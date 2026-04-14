@@ -16,7 +16,7 @@ export default function App() {
 
     try {
       setLoading(true);
-      const res = await fetch("http://192.168.42.142:9056/process-image/", {
+      const res = await fetch("https://distressanalyzerv2-0.up.railway.app/process-image/", {
         method: "POST",
         body: formData,
       });
