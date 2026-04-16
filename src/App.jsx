@@ -37,6 +37,7 @@ export default function App() {
   const [data,        setData]        = useState(null);
   const [error,       setError]       = useState(null);
   const [dragOver,    setDragOver]    = useState(false);
+  const [typeScope,   setTypeScope]   = useState("predicted"); // "reported" | "predicted"
   const [filterSev,   setFilterSev]   = useState("ALL");
   const [filterType,  setFilterType]  = useState("ALL");
   const [hovered,     setHovered]     = useState(null);
@@ -70,25 +71,42 @@ export default function App() {
     }
   };
 
+  const scopedDefects = useMemo(() => {
+    if (!data) return [];
+    const want = String(typeScope);
+    return data.defects.filter((d) => String(d.type ?? "").includes(want));
+  }, [data, typeScope]);
+
+  const scopedCounts = useMemo(() => {
+    if (!data) return {};
+    const want = String(typeScope);
+    const counts = data.counts && typeof data.counts === "object" ? data.counts : {};
+    return Object.fromEntries(
+      Object.entries(counts).filter(([k]) => String(k).includes(want))
+    );
+  }, [data, typeScope]);
+
+  const scopedCountsTotal = useMemo(() => {
+    return Object.values(scopedCounts).reduce((sum, v) => sum + (Number(v) || 0), 0);
+  }, [scopedCounts]);
+
   const stats = useMemo(() => {
     if (!data) return null;
     const bySev  = { MILD: 0, MODERATE: 0, SEVERE: 0 };
-    const byType = {};
-    data.defects.forEach((d) => {
+    scopedDefects.forEach((d) => {
       bySev[d.severity]  = (bySev[d.severity]  || 0) + 1;
-      byType[d.type]     = (byType[d.type]      || 0) + 1;
     });
-    return { bySev, byType, total: data.defects.length };
-  }, [data]);
+    return { bySev, total: scopedDefects.length };
+  }, [data, scopedDefects]);
 
   const filtered = useMemo(() => {
     if (!data) return [];
-    return data.defects.filter(
+    return scopedDefects.filter(
       (d) =>
         (filterSev  === "ALL" || d.severity === filterSev) &&
         (filterType === "ALL" || d.type     === filterType)
     );
-  }, [data, filterSev, filterType]);
+  }, [data, scopedDefects, filterSev, filterType]);
 
   return (
     <div style={{ minHeight: "100vh", background: "#f1f5f9" }}>
@@ -335,33 +353,93 @@ export default function App() {
 
             {/* ── TYPE BREAKDOWN ── */}
             <div className="card" style={{ padding: "24px" }}>
-              <p className="section-title">Defect Type Breakdown</p>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                {Object.entries(stats.byType).map(([type, count]) => {
-                  const pct   = stats.total ? (count / stats.total) * 100 : 0;
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                <p className="section-title" style={{ marginBottom: 0 }}>Defect Type Breakdown</p>
+                <div style={{
+                  display: "inline-flex",
+                  background: "#f8fafc",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "10px",
+                  padding: "4px",
+                  gap: "4px",
+                }}>
+                  {[
+                    { key: "reported", label: "Reported" },
+                    { key: "predicted", label: "Predicted" },
+                  ].map((opt) => {
+                    const active = typeScope === opt.key;
+                    return (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() => {
+                          setTypeScope(opt.key);
+                          setFilterType("ALL");
+                        }}
+                        style={{
+                          padding: "6px 10px",
+                          fontSize: "12px",
+                          fontWeight: 700,
+                          borderRadius: "8px",
+                          border: "none",
+                          cursor: "pointer",
+                          background: active ? "#1e40af" : "transparent",
+                          color: active ? "#fff" : "#64748b",
+                          transition: "background 0.15s, color 0.15s",
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                {Object.entries(scopedCounts).map(([type, count]) => {
+                  const pct   = scopedCountsTotal ? (count / scopedCountsTotal) * 100 : 0;
                   return (
-                    <div key={type}>
-                      <div style={{ display: "flex", justifyContent: "space-between",
-                                    alignItems: "center", marginBottom: "4px" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                          <span style={{ width: "8px", height: "8px", borderRadius: "50%",
-                                         background: typeDotColor(type), display: "inline-block",
-                                         flexShrink: 0 }} />
-                          <span style={{ fontSize: "13px", fontWeight: 500, color: "#374151" }}>
-                            {typeLabel(type)}
-                          </span>
+                    <div key={type} className="stat-card" style={{ padding: "18px 18px 16px" }}>
+                      <div className="accent-bar" style={{ background: typeDotColor(type) }} />
+                      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "10px" }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                            <span style={{
+                              width: "8px", height: "8px", borderRadius: "50%",
+                              background: typeDotColor(type), display: "inline-block",
+                              flexShrink: 0,
+                            }} />
+                            <span
+                              title={typeLabel(type)}
+                              style={{
+                                fontSize: "13px",
+                                fontWeight: 700,
+                                color: "#0f172a",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {typeLabel(type)}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "8px" }}>
+                            {pct.toFixed(0)}% of all detected defects
+                          </div>
                         </div>
-                        <span style={{ fontSize: "16px", fontWeight: 700, color: "#0f172a" }}>
-                          {count}
-                        </span>
+
+                        <div style={{ textAlign: "right" }}>
+                          <div style={{ fontSize: "30px", fontWeight: 800, lineHeight: 1, color: typeDotColor(type) }}>
+                            {count}
+                          </div>
+                          <div style={{ fontSize: "11px", fontWeight: 600, color: "#64748b", marginTop: "6px" }}>
+                            defects
+                          </div>
+                        </div>
                       </div>
-                      <div className="prog-track">
-                        <div className="prog-fill"
-                             style={{ width: `${pct}%`, background: typeDotColor(type) }} />
+
+                      <div className="prog-track" style={{ marginTop: "12px" }}>
+                        <div className="prog-fill" style={{ width: `${pct}%`, background: typeDotColor(type) }} />
                       </div>
-                      <p style={{ fontSize: "11px", color: "#94a3b8", marginTop: "5px" }}>
-                        {pct.toFixed(0)}% of all detected defects
-                      </p>
                     </div>
                   );
                 })}
@@ -393,7 +471,7 @@ export default function App() {
                   <select className="filter-select" value={filterType}
                           onChange={(e) => setFilterType(e.target.value)}>
                     <option value="ALL">All Types</option>
-                    {Object.keys(stats.byType).map((k) => (
+                    {Object.keys(scopedCounts).map((k) => (
                       <option key={k} value={k}>{typeLabel(k)}</option>
                     ))}
                   </select>
