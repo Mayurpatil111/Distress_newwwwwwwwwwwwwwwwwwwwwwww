@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useCallback } from "react";
+import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import "./App.css";
 
 const API_URL = "https://distressanalyzerv2-0.up.railway.app/process-image/";
@@ -32,6 +32,10 @@ const typeDotColor = (t) => {
 export default function App() {
   const [file,        setFile]        = useState(null);
   const [preview,     setPreview]     = useState(null);
+  const [selectedLibId, setSelectedLibId] = useState(null);
+  const [imageLibrary, setImageLibrary] = useState([]); // {id, file, url, name, size, addedAt}[]
+  const [libLoading, setLibLoading] = useState(false);
+  const [libError, setLibError] = useState(null);
   const [processType, setProcessType] = useState("already_rotated");
   const [loading,     setLoading]     = useState(false);
   const [data,        setData]        = useState(null);
@@ -42,15 +46,167 @@ export default function App() {
   const [filterType,  setFilterType]  = useState("ALL");
   const [hovered,     setHovered]     = useState(null);
   const fileRef = useRef(null);
+  const libInputRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      // cleanup object URLs on unmount
+      imageLibrary.forEach((it) => {
+        try { URL.revokeObjectURL(it.url); } catch { /* noop */ }
+      });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const selectFromLibrary = useCallback(async (item) => {
+    setSelectedLibId(item.id);
+    setData(null);
+    setError(null);
+
+    // Local image
+    if (item.file) {
+      setFile(item.file);
+      setPreview(item.url);
+      return;
+    }
+
+    // Remote image: fetch to blob -> File so existing upload pipeline stays same
+    try {
+      const res = await fetch(item.remoteUrl);
+      if (!res.ok) throw new Error(`Failed to download image (${res.status})`);
+      const blob = await res.blob();
+      const name = item.name || `image-${item.id}.jpg`;
+      const f = new File([blob], name, { type: blob.type || "image/jpeg" });
+      const objUrl = URL.createObjectURL(f);
+
+      setImageLibrary((prev) =>
+        prev.map((x) => (x.id === item.id ? { ...x, file: f, url: objUrl, size: f.size } : x))
+      );
+      setFile(f);
+      setPreview(objUrl);
+    } catch (e) {
+      setLibError(e?.message || "Failed to download image");
+    }
+  }, []);
+
+  const addImagesToLibrary = useCallback((files) => {
+    const arr = Array.from(files || []).filter((f) => f?.type?.startsWith("image/"));
+    if (arr.length === 0) return;
+    setLibError(null);
+    setImageLibrary((prev) => {
+      const next = [...prev];
+      for (const f of arr) {
+        const url = URL.createObjectURL(f);
+        const item = {
+          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          file: f,
+          url,
+          name: f.name,
+          size: f.size,
+          addedAt: Date.now(),
+        };
+        next.unshift(item);
+      }
+      return next;
+    });
+  }, []);
+
+  const removeFromLibrary = useCallback((id) => {
+    setImageLibrary((prev) => {
+      const item = prev.find((x) => x.id === id);
+      if (item) {
+        if (item.url?.startsWith("blob:")) {
+          try { URL.revokeObjectURL(item.url); } catch { /* noop */ }
+        }
+      }
+      return prev.filter((x) => x.id !== id);
+    });
+    if (selectedLibId === id) {
+      setSelectedLibId(null);
+      setFile(null);
+      setPreview(null);
+      setData(null);
+    }
+  }, [selectedLibId]);
+
+  const fetchRemoteImages = useCallback(async () => {
+    setLibLoading(true);
+    setLibError(null);
+    try {
+      const res = await fetch("https://kml-backend-production-501c.up.railway.app/api/merge-images/local-user?only=merge_kml", {
+        headers: { accept: "application/json" },
+      });
+      if (!res.ok) throw new Error(`Server error — HTTP ${res.status}`);
+      const json = await res.json();
+
+      // Accept multiple response shapes:
+      // - ["https://...","https://..."]
+      // - { images: [ { url, name }, ... ] }
+      // - { data: [ ... ] }
+      const arr =
+        Array.isArray(json) ? json :
+        Array.isArray(json?.images) ? json.images :
+        Array.isArray(json?.data) ? json.data :
+        [];
+
+      const items = arr
+        .map((x) => {
+          if (typeof x === "string") return { url: x };
+          if (x && typeof x === "object") {
+            const url =
+              x.publicUrl ||
+              x.url ||
+              x.image ||
+              x.path;
+            const name =
+              x.fileName ||
+              x.name ||
+              x.filename;
+            return { url, name, size: x.size, side: x.side, modifiedAt: x.modifiedAt };
+          }
+          return null;
+        })
+        .filter((x) => x?.url);
+
+      if (items.length === 0) throw new Error("No images returned by endpoint");
+
+      // Replace library with remote items (no blob urls yet)
+      setImageLibrary(items.map((it, idx) => ({
+        id: `remote-${Date.now()}-${idx}`,
+        file: null,
+        url: it.url, // render directly
+        remoteUrl: it.url,
+        name: it.name || it.url.split("/").pop() || `remote-${idx + 1}`,
+        size: Number(it.size) || 0,
+        side: it.side,
+        modifiedAt: it.modifiedAt,
+        addedAt: Date.now(),
+      })));
+      setSelectedLibId(null);
+      setFile(null);
+      setPreview(null);
+      setData(null);
+    } catch (e) {
+      setLibError(e?.message || "Failed to fetch images");
+    } finally {
+      setLibLoading(false);
+    }
+  }, []);
 
   const handleFile = useCallback((f) => {
     if (!f?.type.startsWith("image/")) return;
-    setFile(f);
-    setData(null);
-    setError(null);
-    const r = new FileReader();
-    r.onload = (e) => setPreview(e.target.result);
-    r.readAsDataURL(f);
+    // Add to library and select it (single source of truth for preview URL)
+    const url = URL.createObjectURL(f);
+    const item = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      file: f,
+      url,
+      name: f.name,
+      size: f.size,
+      addedAt: Date.now(),
+    };
+    setImageLibrary((prev) => [item, ...prev]);
+    selectFromLibrary(item);
   }, []);
 
   const handleSubmit = async () => {
@@ -176,6 +332,170 @@ export default function App() {
       {/* ════════ MAIN ════════ */}
       <main style={{ maxWidth: "1280px", margin: "0 auto", padding: "28px 24px 48px",
                      display: "flex", flexDirection: "column", gap: "24px" }}>
+
+        {/* ── IMAGE LIBRARY ── */}
+        <div className="card" style={{ padding: "20px 24px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <p className="section-title" style={{ marginBottom: 0 }}>Image Library</p>
+              <p style={{ fontSize: "13px", color: "#64748b", marginTop: 6 }}>
+                Add images here, then click one to use it in “Upload Road Image”.
+              </p>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                ref={libInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  addImagesToLibrary(e.target.files);
+                  if (libInputRef.current) libInputRef.current.value = "";
+                }}
+              />
+              <button
+                type="button"
+                className="filter-select"
+                style={{ padding: "8px 12px" }}
+                onClick={() => libInputRef.current?.click()}
+              >
+                Add images
+              </button>
+              <button
+                type="button"
+                className="filter-select"
+                style={{ padding: "8px 12px" }}
+                onClick={fetchRemoteImages}
+                disabled={libLoading}
+              >
+                {libLoading ? "Getting..." : "Get images"}
+              </button>
+              <button
+                type="button"
+                className="filter-select"
+                style={{ padding: "8px 12px" }}
+                onClick={() => {
+                  // clear library
+                  imageLibrary.forEach((it) => {
+                    if (it.url?.startsWith("blob:")) {
+                      try { URL.revokeObjectURL(it.url); } catch { /* noop */ }
+                    }
+                  });
+                  setImageLibrary([]);
+                  setSelectedLibId(null);
+                  setFile(null);
+                  setPreview(null);
+                  setData(null);
+                  setError(null);
+                }}
+                disabled={imageLibrary.length === 0}
+              >
+                Clear library
+              </button>
+            </div>
+          </div>
+
+          {libError && (
+            <div style={{
+              marginTop: 12,
+              border: "1px solid #fecaca",
+              background: "#fef2f2",
+              color: "#dc2626",
+              borderRadius: 10,
+              padding: "10px 12px",
+              fontSize: 12,
+              fontWeight: 600,
+            }}>
+              {libError}
+            </div>
+          )}
+
+          {imageLibrary.length === 0 ? (
+            <div style={{
+              marginTop: 14,
+              border: "1px dashed #cbd5e1",
+              borderRadius: 10,
+              padding: "18px 16px",
+              background: "#f8fafc",
+              color: "#64748b",
+              fontSize: 13,
+              textAlign: "center",
+            }}>
+              No images yet. Click <b>Add images</b> to populate the library.
+            </div>
+          ) : (
+            <div style={{
+              marginTop: 14,
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))",
+              gap: 12,
+            }}>
+              {imageLibrary.map((it) => {
+                const active = it.id === selectedLibId;
+                return (
+                  <div
+                    key={it.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => selectFromLibrary(it)}
+                    onKeyDown={(e) => { if (e.key === "Enter") selectFromLibrary(it); }}
+                    style={{
+                      border: active ? "2px solid #1e40af" : "1px solid #e2e8f0",
+                      borderRadius: 12,
+                      overflow: "hidden",
+                      background: "#fff",
+                      boxShadow: active ? "0 6px 18px rgba(30,64,175,0.18)" : "0 1px 3px rgba(0,0,0,0.05)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ position: "relative" }}>
+                      <img
+                        src={it.url}
+                        alt={it.name}
+                        style={{ width: "100%", height: 86, objectFit: "cover", display: "block" }}
+                      />
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); removeFromLibrary(it.id); }}
+                        style={{
+                          position: "absolute",
+                          top: 6,
+                          right: 6,
+                          background: "rgba(15, 23, 42, 0.55)",
+                          color: "#fff",
+                          border: "none",
+                          borderRadius: 8,
+                          padding: "4px 7px",
+                          fontSize: 12,
+                          cursor: "pointer",
+                        }}
+                        aria-label={`Remove ${it.name}`}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div style={{ padding: "8px 10px" }}>
+                      <div style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        color: "#0f172a",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}>
+                        {it.name}
+                      </div>
+                      <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                        {(it.size / 1024).toFixed(1)} KB
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
         {/* ── UPLOAD CARD ── */}
         <div className="card" style={{ padding: "28px" }}>
@@ -536,7 +856,7 @@ function DefectCard({ d, onEnter, onLeave }) {
   const sev  = SEV[d.severity]  || {};
   const cc   = confColor(d.confidence);
   const cbg  = confBg(d.confidence);
-
+  
   return (
     <div className="defect-card"
          onMouseEnter={onEnter}
