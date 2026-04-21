@@ -1,7 +1,9 @@
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import "./App.css";
+import Login from "./Login.jsx";
 
 const API_URL = "https://distressanalyzerv2-0.up.railway.app/process-image/";
+const AUTH_KEY = "roadscan_auth_v1";
 
 /* ── Severity config ── */
 const SEV = {
@@ -30,6 +32,9 @@ const typeDotColor = (t) => {
    APP
 ════════════════════════════════════════ */
 export default function App() {
+  const [isAuthed, setIsAuthed] = useState(false);
+  const [authUser, setAuthUser] = useState("");
+
   const [file,        setFile]        = useState(null);
   const [preview,     setPreview]     = useState(null);
   const [selectedLibId, setSelectedLibId] = useState(null);
@@ -49,10 +54,26 @@ export default function App() {
   const libInputRef = useRef(null);
 
   useEffect(() => {
+    try {
+      const raw = localStorage.getItem(AUTH_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed?.token && parsed?.user) {
+        setIsAuthed(true);
+        setAuthUser(String(parsed.user));
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
     return () => {
       // cleanup object URLs on unmount
       imageLibrary.forEach((it) => {
-        try { URL.revokeObjectURL(it.url); } catch { /* noop */ }
+        if (it.url?.startsWith("blob:")) {
+          try { URL.revokeObjectURL(it.url); } catch { /* noop */ }
+        }
       });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -207,6 +228,20 @@ export default function App() {
     };
     setImageLibrary((prev) => [item, ...prev]);
     selectFromLibrary(item);
+  }, [selectFromLibrary]);
+
+  const logout = useCallback(() => {
+    localStorage.removeItem(AUTH_KEY);
+    setIsAuthed(false);
+    setAuthUser("");
+    setFile(null);
+    setPreview(null);
+    setData(null);
+    setError(null);
+    setImageLibrary([]);
+    setSelectedLibId(null);
+    if (fileRef.current) fileRef.current.value = "";
+    if (libInputRef.current) libInputRef.current.value = "";
   }, []);
 
   const handleSubmit = async () => {
@@ -227,20 +262,34 @@ export default function App() {
     }
   };
 
+  const normalizedDefects = useMemo(() => {
+    if (!data) return [];
+    return (data.defects || []).map((d) => {
+      const depth = Number(d?.max_depth);
+      const isPredAlligator = d?.type === "predicted_alligator_crack";
+      if (isPredAlligator && Number.isFinite(depth) && depth < -40) {
+        return { ...d, type: "reported_pothole" };
+      }
+      return d;
+    });
+  }, [data]);
+
   const scopedDefects = useMemo(() => {
     if (!data) return [];
     const want = String(typeScope);
-    return data.defects.filter((d) => String(d.type ?? "").includes(want));
-  }, [data, typeScope]);
+    return normalizedDefects.filter((d) => String(d.type ?? "").includes(want));
+  }, [data, normalizedDefects, typeScope]);
 
   const scopedCounts = useMemo(() => {
     if (!data) return {};
-    const want = String(typeScope);
-    const counts = data.counts && typeof data.counts === "object" ? data.counts : {};
-    return Object.fromEntries(
-      Object.entries(counts).filter(([k]) => String(k).includes(want))
-    );
-  }, [data, typeScope]);
+    const counts = {};
+    for (const d of scopedDefects) {
+      const t = d?.type;
+      if (!t) continue;
+      counts[t] = (counts[t] || 0) + 1;
+    }
+    return counts;
+  }, [data, scopedDefects]);
 
   const scopedCountsTotal = useMemo(() => {
     return Object.values(scopedCounts).reduce((sum, v) => sum + (Number(v) || 0), 0);
@@ -263,6 +312,39 @@ export default function App() {
         (filterType === "ALL" || d.type     === filterType)
     );
   }, [data, scopedDefects, filterSev, filterType]);
+
+  if (!isAuthed) {
+    return (
+      <Login
+        onLogin={({ user, token, images }) => {
+          localStorage.setItem(AUTH_KEY, JSON.stringify({ token, user }));
+          setAuthUser(String(user));
+          setIsAuthed(true);
+
+          // Populate Image Library from login response (publicUrl)
+          if (Array.isArray(images) && images.length) {
+            setLibError(null);
+            setImageLibrary(
+              images
+                .map((img, idx) => ({
+                  id: `remote-login-${Date.now()}-${idx}`,
+                  file: null,
+                  url: img.publicUrl || img.url,
+                  remoteUrl: img.publicUrl || img.url,
+                  name: img.fileName || img.name || img.filename || `image-${idx + 1}`,
+                  size: Number(img.size) || 0,
+                  side: img.side,
+                  lane: img.lane,
+                  modifiedAt: img.modifiedAt,
+                  addedAt: Date.now(),
+                }))
+                .filter((x) => x.url)
+            );
+          }
+        }}
+      />
+    );
+  }
 
   return (
     <div style={{ minHeight: "100vh", background: "#f1f5f9" }}>
@@ -316,13 +398,26 @@ export default function App() {
                 System Online
               </span>
             </div>
+            {authUser && (
+              <span style={{ fontSize: "12px", color: "#64748b" }}>
+                Signed in as <b style={{ color: "#334155" }}>{authUser}</b>
+              </span>
+            )}
+            <button
+              type="button"
+              className="filter-select"
+              style={{ padding: "7px 12px" }}
+              onClick={logout}
+            >
+              Logout
+            </button>
             {data && (
               <span style={{
                 fontSize: "12px", color: "#64748b",
                 background: "#f1f5f9", padding: "3px 10px",
                 borderRadius: "99px", border: "1px solid #e2e8f0",
               }}>
-                {data.defects.length} defects found
+                {normalizedDefects.length} defects found
               </span>
             )}
           </div>
@@ -1061,3 +1156,6 @@ function DefectTimeline({ defects, onHover }) {
     </div>
   );
 }
+
+
+
